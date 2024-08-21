@@ -2,15 +2,19 @@ import torch
 import av
 import io
 import numpy
-from os.path import isdir, isfile
+from os.path import isdir, isfile, realpath
 from PIL import Image
-from diffusers import AnimateDiffPipeline, MotionAdapter, EulerDiscreteScheduler, StableDiffusionPipeline
+from .diffusers import AnimateDiffPipeline, MotionAdapter, EulerDiscreteScheduler, StableDiffusionPipeline
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
 from pytorch_lightning import seed_everything
 
+file_path = realpath(__file__)
+
 device = "cuda"
 dtype = torch.float16
+
+
 
 def image_array_to_binary_video(video, fps, video_codec = "libx264", is_image_list = False, options = None, audio_array = None, audio_fps = None, audio_codec = None, audio_options = None):
     """
@@ -95,27 +99,27 @@ def image_array_to_binary_video(video, fps, video_codec = "libx264", is_image_li
         for packet in stream.encode():
             container.mux(packet)
 
-    return binary_video.getbuffer()
+    return binary_video.getbuffer().tobytes()
 
 
 def text_to_video(prompt, opt):
 
     model_name = f"animatediff_lightning_{opt["step"]}step_diffusers.safetensors"
-    if not isfile("weights/animate/" + model_name):
-        hf_hub_download(repo = "ByteDance/AnimateDiff-Lightning", ckpt = model_name, local_dir = "weights/animate", local_dir_use_symlinks = False) #Загрузка весов
+    if not isfile(file_path[:file_path.rfind("\\") + 1] + "weights\\animate\\" + model_name):
+        hf_hub_download(repo_id = "ByteDance/AnimateDiff-Lightning", ckpt = model_name, local_dir = file_path[:file_path.rfind("\\") + 1] + "weights\\animate", local_dir_use_symlinks = False) #Загрузка весов
 
-    pretrained_model_name_or_path = "weights/base/" + opt["base"]
+    pretrained_model_name_or_path = file_path[:file_path.rfind("\\") + 1] + "weights\\base\\" + opt["base"]
     if not isdir(pretrained_model_name_or_path):
         pipe = StableDiffusionPipeline.from_single_file(pretrained_model_name_or_path + ".safetensors")
         pipe.save_pretrained(pretrained_model_name_or_path)
 
     adapter = MotionAdapter().to(device, dtype)
 
-    adapter.load_state_dict(load_file(f"weights/animate/animatediff_lightning_{opt["step"]}step_diffusers.safetensors", device = device))
+    adapter.load_state_dict(load_file(file_path[:file_path.rfind("\\") + 1] + f"weights/animate/animatediff_lightning_{opt["step"]}step_diffusers.safetensors", device = device))
 
     seed_everything(opt["seed"])
 
-    pipe = AnimateDiffPipeline.from_pretrained(f"weights/base/{opt["base"]}", use_safetensors=True, motion_adapter = adapter, torch_dtype = dtype).to(device)
+    pipe = AnimateDiffPipeline.from_pretrained(file_path[:file_path.rfind("\\") + 1] + f"weights/base/{opt["base"]}", use_safetensors=True, motion_adapter = adapter, torch_dtype = dtype).to(device)
     pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config, timestep_spacing = "trailing", beta_schedule = "linear")
 
     output = pipe(prompt = prompt, num_frames = opt["num_frames"], height = opt["height"], width = opt["width"], num_inference_steps = opt["num_inference_steps"], guidance_scale = opt["guidance_scale"], negative_prompt = opt["negative_prompt"], num_videos_per_prompt = opt["num_videos_per_prompt"], eta = opt["eta"], generator = opt["generator"], latents = opt["latents"], prompt_embeds = opt["prompt_embeds"], negative_prompt_embeds = opt["negative_prompt_embeds"], ip_adapter_image = opt["ip_adapter_image"], ip_adapter_image_embeds = opt["ip_adapter_image_embeds"], output_type = opt["output_type"], return_dict = opt["return_dict"], cross_attention_kwargs = opt["cross_attention_kwargs"], clip_skip = opt["clip_skip"], callback_on_step_end = opt["callback_on_step_end"], callback_on_step_end_tensor_inputs = opt["callback_on_step_end_tensor_inputs"])
@@ -126,17 +130,17 @@ def text_to_video(prompt, opt):
 
 
 
-def external_text_to_video(prompt):
+def external_text_to_video(prompt: str, output_type: str = "video"):
     '''
     Функция для вызова извне, без необходимости настройки параметров
-    Принимает текстовое описание и то, возвращать видео или список кадров в виде изображений
+    Принимает текстовое описание и тип возвращаемых значений (доступно "video" - бинарное видео, "video_keyframes" - бинарное видео и первый и последний его кадры, "frames" - кадры видео и fps)
     '''
 
     args = {
         "step": 8, # Options: [1,2,4,8]
         "repo": "ByteDance/AnimateDiff-Lightning",
-        "base": "mistoonAnime_v30", #Базовые модели, доступно: (аниме модели: "mistoonAnime_v30", "imp_v10"), "epiCRealism"
-        "fps": 10, #Количество кадров в секунду при экспорте в видео
+        "base": "imp_v10", #Базовые модели, доступно: (аниме модели: "mistoonAnime_v30", "imp_v10"), "epiCRealism"
+        "fps": 8, #Количество кадров в секунду при экспорте в видео
         "seed": 43, #Сид
 
         "height": 320, #The height in pixels of the generated video.
@@ -163,9 +167,14 @@ def external_text_to_video(prompt):
 
     binary_list = text_to_video(prompt = prompt, opt = args)
 
-    binary_video = image_array_to_binary_video(video = binary_list[0], fps = args["fps"], video_codec = "libx264", is_image_list = True)
-
-    return binary_video
+    if "video" in output_type:
+        binary_video = image_array_to_binary_video(video = binary_list[0], fps = args["fps"], video_codec = "libx264", is_image_list = True)
+        if output_type == "video_keyframes": #Если необходим вывод видео и первого и последнего его кадров
+            return binary_video, (binary_list[0][0], binary_list[0][-1]) #Возвращаем бинарное видео и кортеж из первого и последнего кадра видео
+        else:
+            return binary_video #Возвращаем бинарное видео
+    else: #Если необходим вывод видео и их fps
+        return binary_list[0], args["fps"]
 
 
 
